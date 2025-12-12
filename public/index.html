@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Race</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="menu">
+        <h1>Pixel Race</h1>
+        <div class="menu-section">
+            <label>Nick:</label>
+            <input type="text" id="nickname" value="Player 1" maxlength="10">
+        </div>
+        <div class="menu-section">
+            <label>Kolor:</label>
+            <input type="color" id="colorPicker" value="#ff0000">
+        </div>
+        <div class="menu-section">
+            <label>CPU Gracze:</label>
+            <input type="number" id="cpuCount" value="0" min="0" max="5">
+        </div>
+        <div class="menu-section">
+            <label>Dźwięk:</label>
+            <input type="checkbox" id="soundToggle" checked>
+        </div>
+        <button id="startBtn">START (Online/CPU)</button>
+        <button id="localBtn" style="margin-top: 10px; background: #aaf;">LOKALNY 1vs1</button>
+        <button id="builderBtn" style="margin-top: 10px; background: #aaa;">KREATOR TRAS</button>
+    </div>
+    <div id="game-container" style="display:none;">
+        <div id="ui-layer">
+            <div id="lives-container"></div>
+            <div id="lives-container-p2" style="position: absolute; top: 0; right: 0;"></div>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+        <div id="builder-ui" style="display:none;">
+            <h3>Kreator</h3>
+            <div style="display:flex; gap:5px; align-items:center;">
+                W: <input type="number" id="mapWidth" value="800" step="40">
+                H: <input type="number" id="mapHeight" value="600" step="40">
+                <button id="btnResize">Zmień</button>
+            </div>
+            <div style="width:100%; height:1px; background:#555; margin:5px 0;"></div>
+            <button id="toolWall" class="active">Mur</button>
+            <button id="toolErase">Gumka</button>
+            <button id="btnExport">Eksportuj</button>
+            <button id="btnImport">Importuj</button>
+            <button id="btnPlayMap">Graj</button>
+            <button id="btnExitBuilder">Wyjdź</button>
+        </div>
+        <div id="game-over" style="display:none;">
+            <h2>GAME OVER</h2>
+            <button onclick="location.reload()">Zagraj ponownie</button>
+        </div>
+    </div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>

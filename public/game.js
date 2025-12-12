@@ -7,15 +7,27 @@ canvas.height = 600;
 const socket = io();
 
 // Game State
-let gameState = 'MENU'; // MENU, PLAYING, GAME_OVER, BUILDER, LOCAL_1VS1
+let gameState = 'MENU'; // MENU, PLAYING, GAME_OVER, BUILDER, LOCAL_1VS1, RACE, TIME_TRIAL
 let players = {};
 let cpuCars = [];
 let audioCtx;
 let soundEnabled = true;
 let gameMap = []; // Array of {x, y, w, h}
-let builderTool = 'WALL'; // WALL, ERASE
+let gameCheckpoints = []; // Array of {x, y, w, h, order}
+let gameNitro = []; // Array of {x, y, w, h}
+let gameStartPoint = null; // {x, y, w, h}
+let gameFinishPoint = null; // {x, y, w, h}
+let builderTool = 'WALL'; // WALL, ERASE, CHECKPOINT, START, FINISH, NITRO
 let isMouseDown = false;
-const TILE_SIZE = 40;
+const TILE_SIZE = 20;
+
+// Race State
+let raceState = {
+    startTime: 0,
+    currentLap: 1,
+    totalLaps: 3,
+    finished: false
+};
 
 // Player Car (P1 - Arrows)
 const myCar = {
@@ -24,6 +36,7 @@ const myCar = {
     angle: 0,
     speed: 0,
     maxSpeed: 4,
+    baseMaxSpeed: 4,
     acceleration: 0.15,
     friction: 0.05,
     turnSpeed: 0.05,
@@ -31,7 +44,13 @@ const myCar = {
     name: 'P1',
     lives: 3,
     invulnerable: false,
-    invulnerableTimer: 0
+    invulnerableTimer: 0,
+    // Race specific
+    lap: 1,
+    nextCheckpointIndex: 0, // 0..N, then Finish
+    finished: false,
+    finishTime: 0,
+    nitroTimer: 0
 };
 
 // Local Player 2 (P2 - WSAD)
@@ -152,6 +171,7 @@ class CpuCar {
         this.angle = Math.random() * Math.PI * 2;
         this.speed = 0;
         this.maxSpeed = 3 + Math.random() * 2;
+        this.baseMaxSpeed = this.maxSpeed;
         this.color = '#' + Math.floor(Math.random()*16777215).toString(16);
         this.turnSpeed = 0.03 + Math.random() * 0.02;
         this.targetX = Math.random() * canvas.width;
@@ -160,6 +180,11 @@ class CpuCar {
         this.lives = 3;
         this.invulnerable = false;
         this.invulnerableTimer = 0;
+        // Race specific
+        this.lap = 1;
+        this.nextCheckpointIndex = 0;
+        this.finished = false;
+        this.nitroTimer = 0;
     }
 
     update() {
@@ -169,13 +194,48 @@ class CpuCar {
             this.invulnerableTimer--;
             if (this.invulnerableTimer <= 0) this.invulnerable = false;
         }
+        
+        // Nitro Logic
+        if (this.nitroTimer > 0) {
+            this.nitroTimer--;
+            this.maxSpeed = this.baseMaxSpeed * 1.25;
+        } else {
+            this.maxSpeed = this.baseMaxSpeed;
+        }
 
-        // Simple AI: Drive towards random waypoints
-        this.changeTargetTimer++;
-        if (this.changeTargetTimer > 200) {
-            this.targetX = Math.random() * canvas.width;
-            this.targetY = Math.random() * canvas.height;
-            this.changeTargetTimer = 0;
+        // Race Logic for CPU
+        if (gameState === 'RACE' && (gameCheckpoints.length > 0 || gameFinishPoint)) {
+            if (this.finished) {
+                this.speed *= 0.95; // Slow down
+                return;
+            }
+            
+            // Target Logic
+            let targetCp = null;
+            
+            if (this.nextCheckpointIndex < gameCheckpoints.length) {
+                targetCp = gameCheckpoints[this.nextCheckpointIndex];
+            } else if (gameFinishPoint) {
+                targetCp = gameFinishPoint;
+            } else if (gameStartPoint) {
+                // Loop back to start if no finish point (shouldn't happen in new logic but fallback)
+                targetCp = gameStartPoint;
+            }
+
+            if (targetCp) {
+                // Add some randomness to target within checkpoint
+                this.targetX = targetCp.x + targetCp.w/2;
+                this.targetY = targetCp.y + targetCp.h/2;
+            }
+            
+        } else {
+            // Simple AI: Drive towards random waypoints (Battle Mode)
+            this.changeTargetTimer++;
+            if (this.changeTargetTimer > 200) {
+                this.targetX = Math.random() * canvas.width;
+                this.targetY = Math.random() * canvas.height;
+                this.changeTargetTimer = 0;
+            }
         }
 
         const dx = this.targetX - this.x;
@@ -248,8 +308,27 @@ function handleBuilderClick(e) {
         if (!exists) {
             gameMap.push({x: gridX, y: gridY, w: TILE_SIZE, h: TILE_SIZE});
         }
+    } else if (builderTool === 'CHECKPOINT') {
+        // Check if checkpoint exists
+        const exists = gameCheckpoints.some(c => c.x === gridX && c.y === gridY);
+        if (!exists) {
+            gameCheckpoints.push({x: gridX, y: gridY, w: TILE_SIZE, h: TILE_SIZE, order: gameCheckpoints.length});
+        }
+    } else if (builderTool === 'START') {
+        gameStartPoint = {x: gridX, y: gridY, w: TILE_SIZE, h: TILE_SIZE};
+    } else if (builderTool === 'FINISH') {
+        gameFinishPoint = {x: gridX, y: gridY, w: TILE_SIZE, h: TILE_SIZE};
+    } else if (builderTool === 'NITRO') {
+        const exists = gameNitro.some(n => n.x === gridX && n.y === gridY);
+        if (!exists) {
+            gameNitro.push({x: gridX, y: gridY, w: TILE_SIZE, h: TILE_SIZE});
+        }
     } else if (builderTool === 'ERASE') {
         gameMap = gameMap.filter(w => !(w.x === gridX && w.y === gridY));
+        gameCheckpoints = gameCheckpoints.filter(c => !(c.x === gridX && c.y === gridY));
+        gameNitro = gameNitro.filter(n => !(n.x === gridX && n.y === gridY));
+        if (gameStartPoint && gameStartPoint.x === gridX && gameStartPoint.y === gridY) gameStartPoint = null;
+        if (gameFinishPoint && gameFinishPoint.x === gridX && gameFinishPoint.y === gridY) gameFinishPoint = null;
     }
 }
 
@@ -265,6 +344,26 @@ document.getElementById('builderBtn').addEventListener('click', () => {
 
 document.getElementById('toolWall').addEventListener('click', (e) => {
     builderTool = 'WALL';
+    updateBuilderToolsUI();
+});
+
+document.getElementById('toolStart').addEventListener('click', (e) => {
+    builderTool = 'START';
+    updateBuilderToolsUI();
+});
+
+document.getElementById('toolFinish').addEventListener('click', (e) => {
+    builderTool = 'FINISH';
+    updateBuilderToolsUI();
+});
+
+document.getElementById('toolCheckpoint').addEventListener('click', (e) => {
+    builderTool = 'CHECKPOINT';
+    updateBuilderToolsUI();
+});
+
+document.getElementById('toolNitro').addEventListener('click', (e) => {
+    builderTool = 'NITRO';
     updateBuilderToolsUI();
 });
 
@@ -289,7 +388,11 @@ document.getElementById('btnExport').addEventListener('click', () => {
     const data = {
         width: canvas.width,
         height: canvas.height,
-        map: gameMap
+        map: gameMap,
+        checkpoints: gameCheckpoints,
+        nitro: gameNitro,
+        start: gameStartPoint,
+        finish: gameFinishPoint
     };
     const json = JSON.stringify(data);
     console.log('Map Data:', json);
@@ -303,6 +406,10 @@ document.getElementById('btnImport').addEventListener('click', () => {
             const data = JSON.parse(json);
             if (data.map) {
                 gameMap = data.map;
+                if (data.checkpoints) gameCheckpoints = data.checkpoints;
+                if (data.nitro) gameNitro = data.nitro;
+                if (data.start) gameStartPoint = data.start;
+                if (data.finish) gameFinishPoint = data.finish;
                 if (data.width) canvas.width = data.width;
                 if (data.height) canvas.height = data.height;
                 
@@ -347,10 +454,60 @@ document.getElementById('btnExitBuilder').addEventListener('click', () => {
 
 function updateBuilderToolsUI() {
     document.getElementById('toolWall').classList.toggle('active', builderTool === 'WALL');
+    document.getElementById('toolStart').classList.toggle('active', builderTool === 'START');
+    document.getElementById('toolFinish').classList.toggle('active', builderTool === 'FINISH');
+    document.getElementById('toolCheckpoint').classList.toggle('active', builderTool === 'CHECKPOINT');
+    document.getElementById('toolNitro').classList.toggle('active', builderTool === 'NITRO');
     document.getElementById('toolErase').classList.toggle('active', builderTool === 'ERASE');
 }
 
+document.getElementById('menuImportMapBtn').addEventListener('click', () => {
+    const json = prompt('Wklej kod mapy (JSON):');
+    if (json) {
+        try {
+            const data = JSON.parse(json);
+            if (data.map) {
+                gameMap = data.map;
+                if (data.checkpoints) gameCheckpoints = data.checkpoints;
+                if (data.nitro) gameNitro = data.nitro;
+                if (data.start) gameStartPoint = data.start;
+                if (data.finish) gameFinishPoint = data.finish;
+                if (data.width) canvas.width = data.width;
+                if (data.height) canvas.height = data.height;
+                alert('Mapa wczytana pomyślnie! Możesz teraz uruchomić grę.');
+            } else if (Array.isArray(data)) {
+                gameMap = data;
+                alert('Mapa wczytana pomyślnie! Możesz teraz uruchomić grę.');
+            } else {
+                alert('Nieprawidłowy format mapy.');
+            }
+        } catch (e) {
+            alert('Błąd parsowania JSON');
+        }
+    }
+});
+
 document.getElementById('startBtn').addEventListener('click', () => {
+    startGame('PLAYING');
+});
+
+document.getElementById('raceBtn').addEventListener('click', () => {
+    if (!gameStartPoint && gameCheckpoints.length === 0) {
+        alert('Musisz najpierw stworzyć/wczytać mapę z punktem START!');
+        return;
+    }
+    startGame('RACE');
+});
+
+document.getElementById('timeTrialBtn').addEventListener('click', () => {
+    if (!gameStartPoint && gameCheckpoints.length === 0) {
+        alert('Musisz najpierw stworzyć/wczytać mapę z punktem START!');
+        return;
+    }
+    startGame('TIME_TRIAL');
+});
+
+function startGame(mode) {
     const nick = document.getElementById('nickname').value;
     const color = document.getElementById('colorPicker').value;
     const cpuCount = parseInt(document.getElementById('cpuCount').value);
@@ -359,8 +516,29 @@ document.getElementById('startBtn').addEventListener('click', () => {
     myCar.color = color;
     myCar.name = nick;
     myCar.lives = 3;
-    myCar.x = 400;
-    myCar.y = 300;
+    
+    // Reset Race Stats
+    myCar.lap = 1;
+    myCar.nextCheckpointIndex = 0;
+    myCar.finished = false;
+    myCar.nitroTimer = 0;
+    raceState.startTime = Date.now();
+    raceState.currentLap = 1;
+    raceState.finished = false;
+
+    // Spawn at Start Point
+    if (gameStartPoint) {
+        myCar.x = gameStartPoint.x + TILE_SIZE/2;
+        myCar.y = gameStartPoint.y + TILE_SIZE/2;
+    } else if (gameCheckpoints.length > 0) {
+        // Fallback to old logic
+        myCar.x = gameCheckpoints[0].x + TILE_SIZE/2;
+        myCar.y = gameCheckpoints[0].y + TILE_SIZE/2;
+    } else {
+        myCar.x = 400;
+        myCar.y = 300;
+    }
+    
     updateLivesUI();
 
     // Init Sound
@@ -368,23 +546,45 @@ document.getElementById('startBtn').addEventListener('click', () => {
 
     // Init CPU
     cpuCars = [];
-    for(let i=0; i<cpuCount; i++) {
-        cpuCars.push(new CpuCar(i));
+    if (mode !== 'TIME_TRIAL') {
+        for(let i=0; i<cpuCount; i++) {
+            const cpu = new CpuCar(i);
+            if (gameStartPoint) {
+                cpu.x = gameStartPoint.x + TILE_SIZE/2;
+                cpu.y = gameStartPoint.y + TILE_SIZE/2;
+            } else if (gameCheckpoints.length > 0) {
+                cpu.x = gameCheckpoints[0].x + TILE_SIZE/2;
+                cpu.y = gameCheckpoints[0].y + TILE_SIZE/2;
+            }
+            cpuCars.push(cpu);
+        }
     }
 
-    // Join Server Game
-    socket.emit('joinGame', {
-        name: nick,
-        color: color
-    });
+    // Join Server Game (Only for PLAYING/RACE)
+    if (mode !== 'TIME_TRIAL') {
+        socket.emit('joinGame', {
+            name: nick,
+            color: color
+        });
+    }
 
     // UI Switch
     document.getElementById('menu').style.display = 'none';
     document.getElementById('game-container').style.display = 'block';
     document.getElementById('game-over').style.display = 'none';
     document.getElementById('lives-container-p2').innerHTML = ''; // Clear P2 UI
-    gameState = 'PLAYING';
-});
+    
+    // Race UI
+    if (mode === 'RACE' || mode === 'TIME_TRIAL') {
+        document.getElementById('race-ui').style.display = 'block';
+        document.getElementById('lives-container').style.display = 'none';
+    } else {
+        document.getElementById('race-ui').style.display = 'none';
+        document.getElementById('lives-container').style.display = 'block';
+    }
+
+    gameState = mode;
+}
 
 document.getElementById('localBtn').addEventListener('click', () => {
     soundEnabled = document.getElementById('soundToggle').checked;
@@ -673,7 +873,20 @@ function gameOver() {
 }
 
 function update() {
-    if (gameState !== 'PLAYING' && gameState !== 'LOCAL_1VS1') return;
+    if (gameState !== 'PLAYING' && gameState !== 'LOCAL_1VS1' && gameState !== 'RACE' && gameState !== 'TIME_TRIAL') return;
+
+    // Race Logic Update
+    if (gameState === 'RACE' || gameState === 'TIME_TRIAL') {
+        if (!myCar.finished) {
+            const elapsed = Date.now() - raceState.startTime;
+            const mins = Math.floor(elapsed / 60000);
+            const secs = Math.floor((elapsed % 60000) / 1000);
+            const ms = Math.floor((elapsed % 1000) / 10);
+            document.getElementById('race-timer').innerText = 
+                `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+            document.getElementById('lap-counter').innerText = `LAP: ${myCar.lap}/${raceState.totalLaps}`;
+        }
+    }
 
     // --- Player 1 (Arrows) ---
     if (myCar.lives > 0) {
@@ -750,12 +963,20 @@ function update() {
     }
 
     // CPU Updates
-    if (gameState === 'PLAYING') {
+    if (gameState === 'PLAYING' || gameState === 'RACE') {
         cpuCars.forEach(cpu => cpu.update());
     }
 
     // Collisions
     checkCollisions();
+    checkCheckpoints(myCar);
+    checkNitro(myCar);
+    if (gameState === 'RACE') {
+        cpuCars.forEach(cpu => {
+            checkCheckpoints(cpu);
+            checkNitro(cpu);
+        });
+    }
 
     // Sound (Mix speeds)
     let maxSpeed = Math.abs(myCar.speed);
@@ -765,7 +986,7 @@ function update() {
     SoundManager.updateEngine(maxSpeed);
 
     // Network (Only P1 sends data if online)
-    if (gameState === 'PLAYING') {
+    if (gameState === 'PLAYING' || gameState === 'RACE') {
         socket.emit('playerMovement', {
             x: myCar.x,
             y: myCar.y,
@@ -778,6 +999,59 @@ function update() {
             players[socket.id].y = myCar.y;
             players[socket.id].angle = myCar.angle;
             players[socket.id].color = myCar.color; 
+        }
+    }
+}
+
+function checkNitro(car) {
+    if (gameNitro.length === 0) return;
+    
+    for (let n of gameNitro) {
+        if (car.x > n.x && car.x < n.x + n.w &&
+            car.y > n.y && car.y < n.y + n.h) {
+            car.nitroTimer = 60; // 1 second
+        }
+    }
+}
+
+function checkCheckpoints(car) {
+    if (car.finished) return;
+
+    // Determine target
+    let targetCp = null;
+    let isFinishLine = false;
+
+    if (car.nextCheckpointIndex < gameCheckpoints.length) {
+        targetCp = gameCheckpoints[car.nextCheckpointIndex];
+    } else if (gameFinishPoint) {
+        targetCp = gameFinishPoint;
+        isFinishLine = true;
+    } else if (gameStartPoint) {
+        // Loop back to start if no finish point
+        targetCp = gameStartPoint;
+        isFinishLine = true;
+    }
+
+    if (!targetCp) return;
+
+    // Check collision with target
+    if (car.x > targetCp.x && car.x < targetCp.x + targetCp.w &&
+        car.y > targetCp.y && car.y < targetCp.y + targetCp.h) {
+        
+        if (isFinishLine) {
+            // Lap Complete
+            if (car.lap < raceState.totalLaps) {
+                car.lap++;
+                car.nextCheckpointIndex = 0; // Reset to first CP
+            } else {
+                car.finished = true;
+                if (car === myCar) {
+                    alert('META! Twój czas: ' + document.getElementById('race-timer').innerText);
+                }
+            }
+        } else {
+            // Intermediate CP hit
+            car.nextCheckpointIndex++;
         }
     }
 }
@@ -816,7 +1090,7 @@ function drawCar(x, y, angle, color, label, invulnerable) {
 }
 
 function draw() {
-    if (gameState !== 'PLAYING' && gameState !== 'GAME_OVER' && gameState !== 'BUILDER' && gameState !== 'LOCAL_1VS1') return;
+    if (gameState !== 'PLAYING' && gameState !== 'GAME_OVER' && gameState !== 'BUILDER' && gameState !== 'LOCAL_1VS1' && gameState !== 'RACE' && gameState !== 'TIME_TRIAL') return;
 
     // BG
     ctx.fillStyle = '#222';
@@ -842,17 +1116,68 @@ function draw() {
         ctx.strokeRect(wall.x, wall.y, wall.w, wall.h);
     }
 
+    // Draw Checkpoints
+    gameCheckpoints.forEach((cp, index) => {
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+        ctx.fillRect(cp.x, cp.y, cp.w, cp.h);
+        
+        if (gameState === 'BUILDER') {
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Arial';
+            ctx.fillText(index + 1, cp.x + 10, cp.y + 25);
+        }
+    });
+
+    // Draw Start
+    if (gameStartPoint) {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+        ctx.fillRect(gameStartPoint.x, gameStartPoint.y, gameStartPoint.w, gameStartPoint.h);
+        if (gameState === 'BUILDER') {
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Arial';
+            ctx.fillText('S', gameStartPoint.x + 15, gameStartPoint.y + 25);
+        }
+    }
+
+    // Draw Finish
+    if (gameFinishPoint) {
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+        ctx.fillRect(gameFinishPoint.x, gameFinishPoint.y, gameFinishPoint.w, gameFinishPoint.h);
+        // Checkerboard pattern
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(gameFinishPoint.x, gameFinishPoint.y, 20, 20);
+        ctx.fillRect(gameFinishPoint.x + 20, gameFinishPoint.y + 20, 20, 20);
+        if (gameState === 'BUILDER') {
+            ctx.fillStyle = '#000';
+            ctx.font = '12px Arial';
+            ctx.fillText('M', gameFinishPoint.x + 15, gameFinishPoint.y + 25);
+        }
+    }
+
+    // Draw Nitro
+    ctx.fillStyle = 'rgba(0, 0, 255, 0.5)';
+    for (let n of gameNitro) {
+        ctx.fillRect(n.x, n.y, n.w, n.h);
+        // Arrow
+        ctx.strokeStyle = '#fff';
+        ctx.beginPath();
+        ctx.moveTo(n.x + 10, n.y + 30);
+        ctx.lineTo(n.x + 20, n.y + 10);
+        ctx.lineTo(n.x + 30, n.y + 30);
+        ctx.stroke();
+    }
+
     if (gameState === 'BUILDER') {
         return; 
     }
 
     // Draw CPU
-    if (gameState === 'PLAYING') {
+    if (gameState === 'PLAYING' || gameState === 'RACE') {
         cpuCars.forEach(cpu => cpu.draw());
     }
 
     // Draw Players (Online)
-    if (gameState === 'PLAYING') {
+    if (gameState === 'PLAYING' || gameState === 'RACE') {
         Object.keys(players).forEach((id) => {
             const p = players[id];
             if (id === socket.id) {
@@ -871,6 +1196,10 @@ function draw() {
         if (localPlayer2.lives > 0) {
             drawCar(localPlayer2.x, localPlayer2.y, localPlayer2.angle, localPlayer2.color, localPlayer2.name, localPlayer2.invulnerable);
         }
+    }
+    // Draw Time Trial
+    if (gameState === 'TIME_TRIAL') {
+        drawCar(myCar.x, myCar.y, myCar.angle, myCar.color, myCar.name, myCar.invulnerable);
     }
 }
 

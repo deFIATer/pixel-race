@@ -8,6 +8,9 @@ const socket = io();
 
 // Game State
 let gameState = 'MENU'; // MENU, PLAYING, GAME_OVER, BUILDER, LOCAL_1VS1, RACE, TIME_TRIAL
+let menuButtons = ['startBtn', 'raceBtn', 'timeTrialBtn', 'localBtn', 'builderBtn', 'menuImportMapBtn'];
+let menuIndex = 0;
+let menuInputDelay = 0;
 let players = {};
 let cpuCars = [];
 let audioCtx;
@@ -79,7 +82,8 @@ let keys = {
     KeyW: false,
     KeyS: false,
     KeyA: false,
-    KeyD: false
+    KeyD: false,
+    Enter: false
 };
 
 // Sound Manager
@@ -396,7 +400,36 @@ document.getElementById('btnExport').addEventListener('click', () => {
     };
     const json = JSON.stringify(data);
     console.log('Map Data:', json);
-    alert('Mapa wyeksportowana do konsoli (F12 -> Console). Skopiuj ją stamtąd.');
+    
+    navigator.clipboard.writeText(json).then(() => {
+        alert('Mapa skopiowana do schowka!');
+    }).catch(err => {
+        console.error('Błąd kopiowania:', err);
+        alert('Nie udało się skopiować do schowka. Mapa jest w konsoli (F12).');
+    });
+});
+
+document.getElementById('btnSave').addEventListener('click', () => {
+    const data = {
+        width: canvas.width,
+        height: canvas.height,
+        map: gameMap,
+        checkpoints: gameCheckpoints,
+        nitro: gameNitro,
+        start: gameStartPoint,
+        finish: gameFinishPoint
+    };
+    const json = JSON.stringify(data, null, 2); // Pretty print
+    const blob = new Blob([json], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pixel-race-map-' + Date.now() + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 });
 
 document.getElementById('btnImport').addEventListener('click', () => {
@@ -615,6 +648,17 @@ document.getElementById('localBtn').addEventListener('click', () => {
     document.getElementById('game-container').style.display = 'block';
     document.getElementById('game-over').style.display = 'none';
     gameState = 'LOCAL_1VS1';
+});
+
+// Menu Navigation Helpers
+menuButtons.forEach((btnId, index) => {
+    const btn = document.getElementById(btnId);
+    if (btn) {
+        btn.addEventListener('mouseenter', () => {
+            menuIndex = index;
+            btn.focus();
+        });
+    }
 });
 
 // Socket Events
@@ -872,7 +916,99 @@ function gameOver() {
     if (audioCtx) audioCtx.close();
 }
 
+function getGamepadInput(index) {
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = gamepads[index];
+    
+    if (!gp) return { throttle: 0, steer: 0 };
+
+    const deadzone = 0.1;
+    let steer = 0;
+    let throttle = 0;
+
+    // Steering: Axis 0 (Left Stick X)
+    if (Math.abs(gp.axes[0]) > deadzone) {
+        steer = gp.axes[0];
+    }
+    
+    // D-Pad (Standard mapping: 14 Left, 15 Right)
+    if (gp.buttons[14] && gp.buttons[14].pressed) steer = -1;
+    if (gp.buttons[15] && gp.buttons[15].pressed) steer = 1;
+
+    // Throttle: R2 (Button 7) - L2 (Button 6)
+    const r2 = (gp.buttons[7] && gp.buttons[7].value) || 0;
+    const l2 = (gp.buttons[6] && gp.buttons[6].value) || 0;
+    
+    if (r2 > deadzone) throttle += r2;
+    if (l2 > deadzone) throttle -= l2;
+
+    // Face Buttons: A/Cross (0) to accelerate, B/Circle (1) to brake/reverse
+    if (gp.buttons[0] && gp.buttons[0].pressed) throttle = 1;
+    if (gp.buttons[1] && gp.buttons[1].pressed) throttle = -1;
+
+    return { throttle, steer };
+}
+
+function updateMenu() {
+    if (menuInputDelay > 0) {
+        menuInputDelay--;
+    }
+
+    let move = 0;
+    
+    // Keyboard
+    if (keys.ArrowUp || keys.KeyW) move = -1;
+    if (keys.ArrowDown || keys.KeyS) move = 1;
+
+    // Gamepad
+    const gp = getGamepadInput(0);
+    if (Math.abs(gp.throttle) > 0.5) { // Using throttle/brake as up/down navigation? No, usually stick/dpad
+        // My getGamepadInput returns throttle/steer. I should probably check raw gamepad for menu navigation
+        // or update getGamepadInput to return more data.
+        // Let's check raw gamepad here for simplicity or use what we have.
+        // Actually getGamepadInput maps buttons to throttle/steer.
+        // Let's use raw navigator.getGamepads() here for menu to be sure.
+    }
+    
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp0 = gamepads[0];
+    if (gp0) {
+        // Stick Y (Axis 1)
+        if (gp0.axes[1] < -0.5) move = -1;
+        if (gp0.axes[1] > 0.5) move = 1;
+        
+        // D-Pad (12 Up, 13 Down)
+        if (gp0.buttons[12] && gp0.buttons[12].pressed) move = -1;
+        if (gp0.buttons[13] && gp0.buttons[13].pressed) move = 1;
+    }
+
+    if (move !== 0 && menuInputDelay === 0) {
+        menuIndex += move;
+        if (menuIndex < 0) menuIndex = menuButtons.length - 1;
+        if (menuIndex >= menuButtons.length) menuIndex = 0;
+        
+        document.getElementById(menuButtons[menuIndex]).focus();
+        menuInputDelay = 10; // Debounce
+        SoundManager.playCollision(); // Reuse sound for click/move? Maybe too harsh.
+    }
+
+    // Confirm (Enter or Gamepad A/Cross)
+    let confirm = false;
+    if (keys.Enter) confirm = true;
+    if (gp0 && gp0.buttons[0] && gp0.buttons[0].pressed && menuInputDelay === 0) confirm = true;
+
+    if (confirm && menuInputDelay === 0) {
+        document.getElementById(menuButtons[menuIndex]).click();
+        menuInputDelay = 20;
+    }
+}
+
 function update() {
+    if (gameState === 'MENU') {
+        updateMenu();
+        return;
+    }
+
     if (gameState !== 'PLAYING' && gameState !== 'LOCAL_1VS1' && gameState !== 'RACE' && gameState !== 'TIME_TRIAL') return;
 
     // Race Logic Update
@@ -896,8 +1032,14 @@ function update() {
         }
 
         // Input P1
-        if (keys.ArrowUp) myCar.speed += myCar.acceleration;
-        if (keys.ArrowDown) myCar.speed -= myCar.acceleration;
+        let p1Throttle = 0;
+        if (keys.ArrowUp) p1Throttle += 1;
+        if (keys.ArrowDown) p1Throttle -= 1;
+
+        const gp1 = getGamepadInput(0);
+        if (Math.abs(gp1.throttle) > 0.1) p1Throttle = gp1.throttle;
+
+        myCar.speed += p1Throttle * myCar.acceleration;
         
         // Friction P1
         if (myCar.speed > 0) myCar.speed -= myCar.friction;
@@ -910,8 +1052,13 @@ function update() {
 
         // Turning P1
         if (Math.abs(myCar.speed) > 0.1) {
-            if (keys.ArrowLeft) myCar.angle -= myCar.turnSpeed * Math.sign(myCar.speed);
-            if (keys.ArrowRight) myCar.angle += myCar.turnSpeed * Math.sign(myCar.speed);
+            let p1Steer = 0;
+            if (keys.ArrowLeft) p1Steer = -1;
+            if (keys.ArrowRight) p1Steer = 1;
+
+            if (Math.abs(gp1.steer) > 0.1) p1Steer = gp1.steer;
+
+            myCar.angle += p1Steer * myCar.turnSpeed * Math.sign(myCar.speed);
         }
 
         // Move P1
@@ -933,8 +1080,14 @@ function update() {
         }
 
         // Input P2
-        if (keys.KeyW) localPlayer2.speed += localPlayer2.acceleration;
-        if (keys.KeyS) localPlayer2.speed -= localPlayer2.acceleration;
+        let p2Throttle = 0;
+        if (keys.KeyW) p2Throttle += 1;
+        if (keys.KeyS) p2Throttle -= 1;
+
+        const gp2 = getGamepadInput(1);
+        if (Math.abs(gp2.throttle) > 0.1) p2Throttle = gp2.throttle;
+
+        localPlayer2.speed += p2Throttle * localPlayer2.acceleration;
         
         // Friction P2
         if (localPlayer2.speed > 0) localPlayer2.speed -= localPlayer2.friction;
@@ -947,8 +1100,13 @@ function update() {
 
         // Turning P2
         if (Math.abs(localPlayer2.speed) > 0.1) {
-            if (keys.KeyA) localPlayer2.angle -= localPlayer2.turnSpeed * Math.sign(localPlayer2.speed);
-            if (keys.KeyD) localPlayer2.angle += localPlayer2.turnSpeed * Math.sign(localPlayer2.speed);
+            let p2Steer = 0;
+            if (keys.KeyA) p2Steer = -1;
+            if (keys.KeyD) p2Steer = 1;
+
+            if (Math.abs(gp2.steer) > 0.1) p2Steer = gp2.steer;
+
+            localPlayer2.angle += p2Steer * localPlayer2.turnSpeed * Math.sign(localPlayer2.speed);
         }
 
         // Move P2
